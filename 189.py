@@ -8,6 +8,7 @@ import time
 
 import requests
 import rsa
+from requests_toolbelt.multipart.encoder import MultipartEncoder
 
 session = requests.session()
 session.headers.update({
@@ -202,8 +203,12 @@ def get_files():
 def upload(filePath):
     session.headers["Referer"] = "https://cloud.189.cn"
     def get_upload_url():
-        r = session.post("https://cloud.189.cn/v2/getUserUploadUrl.action")
-        return "https:" + r.json()["uploadUrl"]
+        while True:
+            try:
+                r = session.post("https://cloud.189.cn/v2/getUserUploadUrl.action")
+                return "https:" + r.json()["uploadUrl"]
+            except:
+                login()
     
     def get_session_key():
         r = session.get(
@@ -218,17 +223,21 @@ def upload(filePath):
         filesize = os.path.getsize(filePath)
         print(f"正在上传: {filename} 大小: {get_file_size_str(filesize)}")
         upload_url = get_upload_url()
-        r = session.post(
-            url=upload_url,
-            data={
+        multipart_data = MultipartEncoder(
+            fields={
                 "sessionKey": get_session_key(),
                 "parentId": "-11", # 上传文件夹 根目录
                 "albumId": "undefined",
                 "opertype": "1",
                 "fname": filename,
-            },
-            files={
-                "Filedata": open(filePath, "rb").read()
+                'file': (filename, open(filePath, 'rb'), 'application/octet-stream')
+            }
+        )
+        r = session.post(
+            url=upload_url,
+            data=multipart_data,
+            headers={
+                "Content-Type": multipart_data.content_type
             }
         ).json()
         print(f"上传完毕！文件ID：{r['id']} 上传时间: {r['createDate']}")
