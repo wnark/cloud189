@@ -1,17 +1,17 @@
 import os
-import sys
 from pickle import load, dump
+from cloud189.api.utils import ROOT_DIR
 
 
 __all__ = ['config']
 KEY = 152
-config_file = os.path.dirname(sys.argv[0]) + os.sep + '.config'
+config_file = ROOT_DIR + os.sep + '.config'
 
 
 def encrypt(key, s):
     b = bytearray(str(s).encode("utf-8"))
     n = len(b)
-    c = bytearray(n*2)
+    c = bytearray(n * 2)
     j = 0
     for i in range(0, n):
         b1 = b[i]
@@ -21,8 +21,8 @@ def encrypt(key, s):
         c1 = c1 + 46
         c2 = c2 + 46
         c[j] = c1
-        c[j+1] = c2
-        j = j+2
+        c[j + 1] = c2
+        j = j + 2
     return c.decode("utf-8")
 
 
@@ -54,6 +54,7 @@ def save_config(cf):
 class Config:
 
     def __init__(self):
+        self._users = {}
         self._cookie = {}
         self._username = ""
         self._password = ""
@@ -61,11 +62,45 @@ class Config:
         self._sessionSecret = ""
         self._accessToken = ""
         self._save_path = './downloads'
+        self._work_id = -11
         self._reader_mode = False
 
-    def _save(self):
-        with open(self._config_file, 'wb') as c:
-            dump(self._config, c)
+    def update_user(self):
+        if self._username:
+            self._users[self._username] = (self._cookie, self._username, self._password,
+                                           self._sessionKey, self._sessionSecret, self._accessToken,
+                                           self._save_path, self._work_id)
+
+    def del_user(self, name):
+        name = self.encode(name)
+        if name in self._users:
+            del self._users[name]
+            return True
+        return False
+
+    def change_user(self, name):
+        name = self.encode(name)
+        if name in self._users:
+            user = self._users[name]
+            self._cookie = user[0]
+            self._username = user[1]
+            self._password = user[2]
+            self._sessionKey = user[3]
+            self._sessionSecret = user[4]
+            self._accessToken = user[5]
+            self._save_path = user[6]
+            self._work_id = user[7]
+            save_config(self)
+            return True
+        return False
+
+    def get_users_name(self):
+        return [self.decode(user) for user in self._users]
+
+    def get_user_info(self, name):
+        name = self.encode(name)
+        if name in self._users:
+            return self._users[name]
 
     def encode(self, var):
         if isinstance(var, dict):
@@ -85,8 +120,7 @@ class Config:
                 dvar = decrypt(KEY, var)
             else:
                 dvar = None
-        except Exception as e:
-            # print(e)
+        except Exception:
             dvar = None
         return dvar
 
@@ -97,6 +131,7 @@ class Config:
     @cookie.setter
     def cookie(self, value):
         self._cookie = self.encode(value)
+        self.update_user()
         save_config(self)
 
     @property
@@ -106,6 +141,7 @@ class Config:
     @username.setter
     def username(self, value):
         self._username = self.encode(value)
+        self.update_user()
         save_config(self)
 
     @property
@@ -115,6 +151,7 @@ class Config:
     @password.setter
     def password(self, value):
         self._password = self.encode(value)
+        self.update_user()
         save_config(self)
 
     @property
@@ -124,6 +161,7 @@ class Config:
     @key.setter
     def key(self, value):
         self._sessionKey = self.encode(value)
+        self.update_user()
         save_config(self)
 
     @property
@@ -133,6 +171,7 @@ class Config:
     @secret.setter
     def sectet(self, value):
         self._sessionSecret = self.encode(value)
+        self.update_user()
         save_config(self)
 
     @property
@@ -142,6 +181,7 @@ class Config:
     @token.setter
     def token(self, value):
         self._accessToken = self.encode(value)
+        self.update_user()
         save_config(self)
 
     def set_token(self, key, secret, token):
@@ -149,6 +189,7 @@ class Config:
         self._sessionKey = self.encode(key)
         self._sessionSecret = self.encode(secret)
         self._accessToken = self.encode(token)
+        self.update_user()
         save_config(self)
 
     @property
@@ -158,6 +199,7 @@ class Config:
     @save_path.setter
     def save_path(self, value):
         self._save_path = value
+        self.update_user()
         save_config(self)
 
     @property
@@ -167,6 +209,36 @@ class Config:
     @reader_mode.setter
     def reader_mode(self, value: bool):
         self._reader_mode = value
+        self.update_user()
+        save_config(self)
+
+    @property
+    def work_id(self):
+        return self._work_id
+
+    @work_id.setter
+    def work_id(self, value):
+        self._work_id = value
+        self.update_user()
+        save_config(self)
+
+    def set_infos(self, infos: dict):
+        if "name" in infos:
+            self._username = self.encode(infos["name"])
+        if "pwd" in infos:
+            self._password = self.encode(infos["pwd"])
+        if "cookie" in infos:
+            self._cookie = self.encode(infos["cookie"])
+        if "key" in infos:
+            self._sessionKey = self.encode(infos["key"])
+        if "secret" in infos:
+            self._sessionSecret = self.encode(infos["secret"])
+        if "token" in infos:
+            self._accessToken = self.encode(infos["token"])
+        if "save_path" in infos:
+            self._save_path = infos["save_path"]
+        if "work_id" in infos:
+            self._work_id = infos["work_id"]
         save_config(self)
 
 

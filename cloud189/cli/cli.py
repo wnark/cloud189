@@ -1,15 +1,19 @@
+import os
+from time import sleep
 from getpass import getpass
 from random import choice
 from sys import exit as exit_cmd
 from webbrowser import open_new_tab
 
 from cloud189.api import Cloud189
-from cloud189.api.models import FolderList
+from cloud189.api.models import FileList, PathList
 from cloud189.api.token import get_token
+from cloud189.api.utils import logger
 
 from cloud189.cli import config
 from cloud189.cli.downloader import Downloader, Uploader
 from cloud189.cli.manager import global_task_mgr
+from cloud189.cli.recovery import Recovery
 from cloud189.cli.utils import *
 
 
@@ -21,8 +25,8 @@ class Commander:
         self._disk = Cloud189()
         self._task_mgr = global_task_mgr
         self._dir_list = ''
-        self._file_list = FolderList()
-        self._path_list = FolderList()
+        self._file_list = FileList()
+        self._path_list = PathList()
         self._parent_id = -11
         self._parent_name = ''
         self._work_name = ''
@@ -47,15 +51,14 @@ class Commander:
 
     def bye(self):
         if self._task_mgr.has_alive_task():
-            info(f"有任务在后台运行, 退出请直接关闭窗口")
+            info("有任务在后台运行, 退出请直接关闭窗口")
         else:
+            config.work_id = self._work_id
             exit_cmd(0)
-
-    def exit(self):
-        self.bye()
 
     def rmode(self):
         """适用于屏幕阅读器用户的显示方式"""
+        # TODO
         choice = input("以适宜屏幕阅读器的方式显示(y): ")
         if choice and choice.lower() == 'y':
             config.reader_mode = True
@@ -68,15 +71,21 @@ class Commander:
 
     def cdrec(self):
         """进入回收站模式"""
-        pass
-        # rec = Recovery(self._disk)
-        # rec.run()
-        # self.refresh()
+        rec = Recovery(self._disk)
+        rec.run()
+        self.refresh()
 
-    def refresh(self, dir_id=None):
+    def refresh(self, dir_id=None, auto=False):
         """刷新当前文件夹和路径信息"""
         dir_id = self._work_id if dir_id is None else dir_id
         self._file_list, self._path_list = self._disk.get_file_list(dir_id)
+        if not self._file_list and not self._path_list:
+            if auto:
+                error(f"文件夹 id={dir_id} 无效(被删除), 将切换到根目录！")
+                return self.refresh(-11)
+            else:
+                error(f"文件夹 id 无效 {dir_id=}, {self._work_id=}")
+                return None
         self._prompt = '/'.join(self._path_list.all_name) + ' > '
         self._last_work_id = self._work_id
         self._work_name = self._path_list[-1].name
@@ -85,46 +94,79 @@ class Commander:
             self._parent_name = self._path_list[-2].name
             self._parent_id = self._path_list[-2].id
 
-    def login(self):
+    def login(self, args):
         """登录网盘"""
-        if not config.cookie or self._disk.login_by_cookie(config) != Cloud189.SUCCESS:
-            username = input('输入用户名:')
-            password = getpass('输入密码:')
-            code = self._disk.login(username, password)
-            if code == Cloud189.NETWORK_ERROR:
-                error("登录失败,网络连接异常")
-                return None
-            elif code == Cloud189.FAILED:
-                error('登录失败,用户名或密码错误 :(')
-                return None
-            # 登录成功保存用户 cookie
-            config.username = username
-            config.password = password
-            config.cookie = self._disk.get_cookie()
-            code, token = get_token(username, password)
-            if code == Cloud189.SUCCESS:
-                config.set_token(*token)
-                self._disk.set_session(*token)
-        self.refresh()
-
+        if args:
+            if '--auto' in args:
+                if config.cookie and self._disk.login_by_cookie(config) == Cloud189.SUCCESS:
+                    self.refresh(config.work_id, auto=True)
+                    return None
+        username = input('输入用户名:')
+        password = getpass('输入密码:')
+        if not username or not password:
+            error('没有用户名或密码 :(')
+            return None
+        code = self._disk.login(username, password)
+        if code == Cloud189.NETWORK_ERROR:
+            error("登录失败,网络连接异常")
+            return None
+        elif code == Cloud189.FAILED:
+            error('登录失败,用户名或密码错误 :(')
+            return None
+        # 登录成功保存用户 cookie
+        config.username = username
+        config.password = password
+        config.cookie = self._disk.get_cookie()
+        code, token = get_token(username, password)
+        if code == Cloud189.SUCCESS:
+            config.set_token(*token)
+            self._disk.set_session(*token)
+        self._work_id = -11
+        self.refresh(-11)
 
     def clogin(self):
         """使用 cookie 登录"""
-        open_new_tab('https://cloud.189.cn')
-        info("请设置 Cookie 内容:")
+        if platform() == 'Linux' and not os.environ.get('DISPLAY'):
+            info("请使用浏览器打开: https://cloud.189.cn 获取 cookie")
+        else:
+            open_new_tab('https://cloud.189.cn')
+            info("请设置 Cookie 内容:")
         c_login_user = input("COOKIE_LOGIN_USER=")
         if not c_login_user:
             error("请输入正确的 Cookie 信息")
             return None
         cookie = {"COOKIE_LOGIN_USER": str(c_login_user)}
         if self._disk.login_by_cookie(cookie) == Cloud189.SUCCESS:
-            config.cookie = cookie
+            user = self._disk.get_user_infos()
+            if not user:
+                error("发生未知错误！")
+                return None
+            user_infos = {
+                'name': user.account.replace('@189.cn', ''),
+                'pwd': '',
+                'cookie': cookie,
+                'key': '',
+                'secret': '',
+                'token': '',
+                'save_path': './downloads',
+                'work_id': -11
+            }
+            config.set_infos(user_infos)
+            self._work_id = config.work_id
             self.refresh()
         else:
-            error("登录失败,请检查 Cookie 是否正确")
+            error("登录失败, 请检查 Cookie 是否正确")
 
-    def logout(self):
-        """注销"""
+    def logout(self, args):
+        """注销/删除用户"""
+        if args:  # 删除用户
+            for name in args:
+                result = config.del_user(name)
+                if result:
+                    info(f"成功删除用户 {name}")
+                else:
+                    error(f"删除用户 {name} 失败！")
+            return None
         clear_screen()
         self._prompt = '> '
         # self._disk.logout()  # TODO(rachpt@126.com): 还没有注销登录的方法
@@ -137,10 +179,42 @@ class Commander:
         self._work_name = ''
         config.cookie = None
 
-    def ll(self, args):
-        """列出文件(夹)，详细模式"""
-        self.ls(['-l', *args])
-        self.refresh() if choice([0, 1, 0]) else None # 1/3 概率刷新
+    def su(self, args):
+        """列出、切换用户"""
+        users = config.get_users_name()
+        def list_user():
+            for i, user in enumerate(users):
+                user_info = config.get_user_info(user)
+                methord = "用户名+密码 登录" if user_info[2] else "Cookie 登录"
+                print(f"[{i}] 用户名: {user}, {methord}")
+        if args:
+            if args[0] == '-l':
+                list_user()
+                return None
+            elif args[0] in users:
+                select_user = args[0]
+            else:
+                error(f"用户名 {args[0]} 无效")
+                return None
+        else:
+            list_user()
+            select = input("请输入用户序号, [0、1 ... ]: ")
+            if select.isnumeric():
+                select = int(select)
+                if select > len(users):
+                    error(f"序号 {select} 无效!")
+                    return None
+                select_user = users[select]
+            else:
+                error(f"序号 {select} 无效!")
+                return None
+        config.work_id = self._work_id  # 保存旧的工作目录
+        result = config.change_user(select_user)
+        if result and self._disk.login_by_cookie(config) == Cloud189.SUCCESS:
+            info(f"成功切换至用户 {config.username}")
+            self.refresh(config.work_id)
+        else:
+            error("切换用户失败!")
 
     def ls(self, args):
         """列出文件(夹)"""
@@ -156,7 +230,7 @@ class Commander:
                     flag_full = True
                     fname = args[0]
                 else:
-                    info(f"暂不支持查看多个文件！")
+                    info("暂不支持查看多个文件！")
                     fname = args[0]
             else:
                 if args[0] == '-l':
@@ -184,13 +258,14 @@ class Commander:
         else:
             if self._reader_mode:  # 方便屏幕阅读器阅读
                 for file in self._file_list:
-                    print(f"{handle_name(file.name)}  大小:{get_file_size_str(file.size)}  上传时间:{file.time}  ID:{file.id}")
+                    print(
+                        f"{handle_name(file.name)}  大小:{get_file_size_str(file.size)}  上传时间:{file.ctime}  ID:{file.id}")
             else:  # 普通用户显示方式
                 for file in self._file_list:
-                    star = '✦' if file.isStarred else '✧'
-                    file_name = handle_name(file.name) if file.size else f"\033[1;34m{handle_name(file.name)}\033[0m"
+                    star = '✦' if file.isStarred else '✧'  # 好像 没什么卵用
+                    file_name = f"\033[1;34m{handle_name(file.name)}\033[0m" if file.isFolder else handle_name(file.name)
                     print("# {0:<17}{1:<4}{2:<20}{3:>8}  {4}".format(
-                        file.id, star, file.time, get_file_size_str(file.size), file_name))
+                        file.id, star, file.ctime, get_file_size_str(file.size), file_name))
         if fid != old_fid:
             self._file_list, _ = self._disk.get_file_list(old_fid)
 
@@ -235,7 +310,7 @@ class Commander:
         """删除文件(夹)"""
         if not args:
             info('参数：删除文件夹(夹)名')
-            return
+            return None
         for name in args:
             if file := self._file_list.find_by_name(name):
                 self._disk.delete_by_id(file.id)
@@ -250,68 +325,71 @@ class Commander:
         if not name:
             info('参数：原文件名 [新文件名]')
         elif file := self._file_list.find_by_name(name):
-            new = args[1].strip(' ') if len(args) == 2 else input(f"请输入新文件名：")
+            new = args[1].strip(' ') if len(args) == 2 else input("请输入新文件名：")
+            logger.debug(f"{new=}, {args=}")
             code = self._disk.rename(file.id, new)
             if code == Cloud189.SUCCESS:
                 self.refresh()
             elif code == Cloud189.NETWORK_ERROR:
-                error(f'网络错误，请重试！')
+                error('网络错误，请重试！')
             else:
-                error(f'失败，未知错误！')
+                error('失败，未知错误！')
         else:
             error(f'没有找到文件(夹): {name}')
 
     def mv(self, args):
         """移动文件或文件夹"""
-        info('目前还未完成！')
-        return
         name = args[0]
         if not name:
-            info('参数：文件名 [新文件夹名]')
-        if len(args) >= 2:
-            new = args[1]
-
-        if file := self._file_list.find_by_name(name):
-            taskInfo = {"fileId": str(file.id),
-                        "srcParentId": str(file.pid),
-                        "fileName": file.name,
-                        "isFolder": 1 if file.isFolder else 0 }
-
-        else:
+            info('参数：文件(夹)名 [新文件夹名/id]')
+        folder_name = ''
+        target_id = None
+        file_info = self._file_list.find_by_name(name)
+        if not file_info:
             error(f"文件(夹)不存在: {name}")
             return None
-        # TODO(rachpt@126.com): 需要一个获取所有文件夹名与 fid 的方法 用于移动文件
-        path_list = self._disk.get_move_paths()
-        path_list = {'/'.join(path.all_name): path[-1].id for path in path_list}
-        choice_list = list(path_list.keys())
-        '''
-        def _condition(typed_str, choice_str):
-            path_depth = len(choice_str.split('/'))
-            # 没有输入时, 补全 Cloud189,深度 1
-            if not typed_str and path_depth == 1:
-                return True
-            # Cloud189/ 深度为 2,补全同深度的文件夹 Cloud189/test 、Cloud189/txt
-            # Cloud189/tx 应该补全 Cloud189/txt
-            if path_depth == len(typed_str.split('/')) and choice_str.startswith(typed_str):
-                return True
+        if len(args) > 1:
+            if args[-1].isnumeric():
+                target_id = args[-1]
+            else:
+                folder_name = args[-1]
+        if not target_id:
+            info("正在获取所有文件夹信息，请稍后...")
+            tree_list = self._disk.get_folder_nodes()
+            if not tree_list:
+                error("获取文件夹信息出错，请重试.")
+                return None
+            if folder_name:
+                if folder := tree_list.find_by_name(folder_name):
+                    target_id = folder.id
+                else:
+                    error(f"文件夹 {folder_name} 不存在！")
+                    return None
+            else:
+                tree_dict = tree_list.get_path_id()
+                choice_list = list(tree_dict.keys())
 
-        set_completer(choice_list, condition=_condition)
-        choice = input('请输入路径(TAB键补全) : ')
-        if not choice or choice not in choice_list:
-            error(f"目标路径不存在: {choice}")
-            return None
-        folder_id = path_list.get(choice)
-        if is_file:
-            if self._disk.move_file(fid, folder_id) == Cloud189.SUCCESS:
-                self._file_list.pop_by_id(fid)
-            else:
-                error(f"移动文件到 {choice} 失败")
+                def _condition(typed_str, choice_str):
+                    path_depth = len(choice_str.split('/'))
+                    # 没有输入时, 补全 Cloud189,深度 1
+                    if not typed_str and path_depth == 1:
+                        return True
+                    # Cloud189/ 深度为 2,补全同深度的文件夹 Cloud189/test 、Cloud189/txt
+                    # Cloud189/tx 应该补全 Cloud189/txt
+                    if path_depth == len(typed_str.split('/')) and choice_str.startswith(typed_str):
+                        return True
+
+                set_completer(choice_list, condition=_condition)
+                choice = input('请输入路径(TAB键补全) : ')
+                if not choice or choice not in choice_list:
+                    error(f"目标路径不存在: {choice}")
+                    return None
+                target_id = tree_dict.get(choice)
+
+        if self._disk.move_file(file_info, target_id) == Cloud189.SUCCESS:
+            self._file_list.pop_by_id(file_info.id)
         else:
-            if self._disk.move_folder(fid, folder_id) == Cloud189.SUCCESS:
-                self._dir_list.pop_by_id(fid)
-            else:
-                error(f"移动文件夹到 {choice} 失败")
-        '''
+            error(f"移动文件(夹)到 {choice} 失败")
 
     def down(self, args):
         """自动选择下载方式"""
@@ -322,21 +400,29 @@ class Commander:
                 follow = True
                 args.remove(arg)
         # TODO: 通过分享链接下载
-        for item in args:
-            if file := self._file_list.find_by_name(item):
+        i = 0
+        while i < len(args):
+            item = args[i]
+            if item.startswith("http"):
+                pwd = ''
+                if i < len(args) - 1 and (not args[i + 1].startswith("http")):
+                    pwd = args[i + 1]
+                    i += 1  # 额外加一
+                self._disk.get_file_info_by_url(item, pwd)
+            elif file := self._file_list.find_by_name(item):
                 downloader = Downloader(self._disk)
-                if file.isFolder:
-                    # TODO: 下载文件夹
-                    print("暂不支持下载文件夹！")
-                    continue
+                f_path = '/'.join(self._path_list.all_name)  # 文件在网盘的父路径
+                if file.isFolder:  # 使用 web 接口打包下载文件夹
+                    downloader.set_fid(file.id, is_file=False, f_path=f_path, f_name=item)
+                    task_flag = True
+                    self._task_mgr.add_task(downloader)  # 提交下载任务
                 else:  # 下载文件
-                    path = '/'.join(self._path_list.all_name) + '/' + item  # 文件在网盘的绝对路径
-                    downloader.set_fid(file.id, is_file=True, f_path=path)
+                    downloader.set_fid(file.id, is_file=True, f_path=f_path, f_name=item)
                     task_flag = True
                     self._task_mgr.add_task(downloader)  # 提交下载任务
             else:
                 error(f'文件(夹)不存在: {item}')
-                continue
+            i += 1
         if follow and task_flag:
             self.jobs(['-f', ])
         elif task_flag:
@@ -347,6 +433,7 @@ class Commander:
         follow = False
         for arg in args:
             if arg == '-f':
+                print()
                 follow = True
                 args.remove(arg)
         if not args:
@@ -363,9 +450,11 @@ class Commander:
             info('参数：文件路径')
         task_flag = False
         follow = False
+        force = False
+        mkdir = True
         for arg in args:
-            if arg == '-f':
-                follow = True
+            follow, force, mkdir, match = parsing_up_params(arg, follow, force, mkdir)
+            if match:
                 args.remove(arg)
         for path in args:
             path = path.strip('\"\' ')  # 去除直接拖文件到窗口产生的引号
@@ -374,14 +463,14 @@ class Commander:
                 continue
             uploader = Uploader(self._disk)
             if os.path.isfile(path):
-                uploader.set_upload_path(path, is_file=True)
+                uploader.set_upload_path(path, is_file=True, force=force)
             else:
-                uploader.set_upload_path(path, is_file=False)
+                uploader.set_upload_path(path, is_file=False, force=force, mkdir=mkdir)
             uploader.set_target(self._work_id, self._work_name)
             self._task_mgr.add_task(uploader)
             task_flag = True
         if follow and task_flag:
-            self.jobs(['-f',])
+            self.jobs(['-f', ])
         elif task_flag:
             print("开始上传, 输入 jobs 查看上传进度...")
 
@@ -390,7 +479,7 @@ class Commander:
         name = args[0]
         if not name:
             info('参数：需要分享的文件 [1/2/3] [1/2]')
-            return
+            return None
         if file := self._file_list.find_by_name(name):
             et = args[1] if len(args) >= 2 else None
             ac = args[2] if len(args) >= 3 else None
@@ -398,7 +487,7 @@ class Commander:
             if result.code == Cloud189.SUCCESS:
                 print("-" * 50)
                 print(f"{'文件夹名' if file.isFolder else '文件名  '} : {name}")
-                print(f"上传时间 : {file.time}")
+                print(f"上传时间 : {file.ctime}")
                 if not file.isFolder:
                     print(f"文件大小 : {get_file_size_str(file.size)}")
                 print(f"分享链接 : {result.url}")
@@ -416,55 +505,56 @@ class Commander:
         else:
             error(f"文件(夹)不存在: {name}")
 
-    # def passwd(self, name):
-    #     """设置文件(夹)提取码"""
-    #     if file := self._file_list.find_by_name(name):  # 文件
-    #         inf = self._disk.get_share_info(file.id, True)
-    #         new_pass = input(f'修改提取码 "{inf.pwd or "无"}" -> ')
-    #         if 2 <= len(new_pass) <= 6:
-    #             if new_pass == 'off': new_pass = ''
-    #             if self._disk.set_passwd(file.id, str(new_pass), True) != Cloud189.SUCCESS:
-    #                 error('设置文件提取码失败')
-    #             self.refresh()
-    #         else:
-    #             error('提取码为2-6位字符,关闭请输入off')
-    #     elif folder := self._dir_list.find_by_name(name):  # 文件夹
-    #         inf = self._disk.get_share_info(folder.id, False)
-    #         new_pass = input(f'修改提取码 "{inf.pwd or "无"}" -> ')
-    #         if 2 <= len(new_pass) <= 12:
-    #             if new_pass == 'off': new_pass = ''
-    #             if self._disk.set_passwd(folder.id, str(new_pass), False) != Cloud189.SUCCESS:
-    #                 error('设置文件夹提取码失败')
-    #             self.refresh()
-    #         else:
-    #             error('提取码为2-12位字符,关闭请输入off')
-    #     else:
-    #         error(f'文件(夹)不存在: {name}')
+    def shared(self, args):
+        """显示分享文件"""
+        stype = 1  # 默认查看 发出的分享
+        if args and args[0] == '2':
+            stype = 2  # 收到的分享
+        all_file = self._disk.list_shared_url(stype)
+        if not all_file:
+            info("失败或者没有数据！")
+            return None
+        for item in all_file:
+            f_name = item.name if item.isFolder else f"\033[1;34m{item.name}\033[0m"  # 给你点颜色..
+            print("https:{0:<30} 提取码: {1:>4} [转存/下载/浏览: {2}/{3}/{4}] 文件名: {5}".format(
+                item.url, item.pwd, item.copyC, item.downC, item.prevC, f_name))
 
-    # def desc(self, name):
-    #     """设置文件描述"""
-    #     if file := self._file_list.find_by_name(name):  # 文件
-    #         inf = self._disk.get_share_info(file.id, True)
-    #         print(f"当前描述: {inf.desc or '无'}")
-    #         desc = input(f'修改为 -> ')
-    #         if not desc:
-    #             error(f'文件描述不允许为空')
-    #             return None
-    #         if self._disk.set_desc(file.id, str(desc), True) != Cloud189.SUCCESS:
-    #             error(f'文件描述修改失败')
-    #         self.refresh()
-    #     elif folder := self._dir_list.find_by_name(name):  # 文件夹
-    #         inf = self._disk.get_share_info(folder.id, False)
-    #         print(f"当前描述: {inf.desc}")
-    #         desc = input(f'修改为 -> ') or ''
-    #         if self._disk.set_desc(folder.id, str(desc), False) == Cloud189.SUCCESS:
-    #             if len(desc) == 0:
-    #                 info('文件夹描述已关闭')
-    #         else:
-    #             error(f'文件夹描述修改失败')
-    #         self.refresh()
-    #     else:
-    #         error(f'文件(夹)不存在: {name}')
+    def sign(self, args):
+        """签到 + 抽奖"""
+        if '-a' in args or '--all' in args:
+            old_user = self.who()
+            for user in config.get_users_name():
+                self.su([user, ])
+                sleep(0.5)
+                self._disk.user_sign()
+                sleep(0.5)
+            self.su([old_user, ])
+        else:
+            self._disk.user_sign()
+
+    def who(self):
+        """打印当前登录账户信息，没有错误则返回用户名"""
+        user = self._disk.get_user_infos()
+        if not user:
+            error("发生未知错误！")
+            return None
+        quota = ", 总空间: {:.3f} GB".format(user.quota/1073741824)  # GB
+        used = ", 已使用: {:.3f} GB".format(user.used/1073741824)  # GB
+        nickname = f", 昵称: {user.nickname}"
+        print(f"账号: {user.account}, UID: {user.id}{nickname}{quota}{used}")
+        # 99 家庭云黄金会员, 199 家庭云铂金会员 (可能不是这个的值)
+        if user.vip == 100:
+            vip = "黄金会员"
+        elif user.vip == 200:
+            vip = "铂金会员"
+        else:  # 0
+            vip = "普通会员"
+        start_time = f", 开始时间: {user.beginTime}" if user.beginTime else ''
+        end_time = f", 到期时间: {user.endTime}" if user.endTime else ''
+        print(f"用户类别: {vip}{start_time}{end_time}")
+        if user.domain:
+            print(f"个人主页: https://cloud.189.cn/u/{user.domain}")
+        return user.account.replace('@189.cn', '')
 
     def setpath(self):
         """设置下载路径"""
@@ -475,48 +565,41 @@ class Commander:
         else:
             error('路径非法,取消修改')
 
-    def setsize(self):
-        """设置上传限制"""
-        pass
-        # print(f"当前限制(MB): {config.max_size}")
-        # max_size = input('修改为 -> ')
-        # if not max_size.isnumeric():
-        #     error("请输入大于 100 的数字")
-        #     return None
-        # if self._disk.set_max_size(int(max_size)) != Cloud189.SUCCESS:
-        #     error("设置失败，限制值必需大于 100")
-        #     return None
-        # config.max_size = int(max_size)
+    def ll(self, args):
+        """列出文件(夹)，详细模式"""
+        if choice((0, 1, 0)):  # 1/3 概率刷新
+            self.refresh()
+        self.ls(['-l', *args])
 
-    def setdelay(self):
-        """设置大文件上传延时"""
-        pass
-        # print("大文件数据块上传延时范围(秒), 如: 0 60")
-        # print(f"当前配置: {config.upload_delay}")
-        # tr = input("请输入延时范围: ").split()
-        # if len(tr) != 2:
-        #     error("格式有误!")
-        #     return None
-        # tr = (int(tr[0]), int(tr[1]))
-        # self._disk.set_upload_delay(tr)
-        # config.upload_delay = tr
+    def quota(self):
+        self.who()
 
-    def setpasswd(self):
-        """设置文件(夹)默认上传密码"""
-        print("关闭提取码请输入 off")
-        print(f"当前配置: 文件: {config.default_file_pwd or '无'}, 文件夹: {config.default_dir_pwd or '无'}")
-        file_pwd = input("设置文件默认提取码(2-6位): ")
-        if 2 <= len(file_pwd) <= 6:
-            config.default_file_pwd = '' if file_pwd == 'off' else file_pwd
-        dir_pwd = input("设置文件夹默认提取码(2-12位): ")
-        if 2 <= len(dir_pwd) <= 12:
-            config.default_dir_pwd = '' if dir_pwd == 'off' else dir_pwd
-        info(f"修改成功: 文件: {config.default_file_pwd or '无'}, 文件夹: {config.default_dir_pwd or '无'}, 配置将在下次启动时生效")
+    def exit(self):
+        self.bye()
+
+    def b(self):
+        self.bye()
+
+    def r(self):
+        self.refresh()
+
+    def c(self):
+        self.clear()
+
+    def j(self, args):
+        self.jobs(args)
+
+    def u(self, args):
+        self.upload(args)
+
+    def d(self, args):
+        self.down(args)
 
     def run_one(self, cmd, args):
         """运行单任务入口"""
-        no_arg_cmd = ['help', 'logout', 'update']
-        cmd_with_arg = ['ls', 'll', 'down', 'mkdir', 'mv', 'rename', 'rm', 'share', 'upload']
+        no_arg_cmd = ['help', 'update', 'who', 'quota']
+        cmd_with_arg = ['ls', 'll', 'down', 'mkdir', 'su', 'sign', 'logout',
+                        'mv', 'rename', 'rm', 'share', 'upload']
 
         if cmd in ("upload", "down"):
             if "-f" not in args:
@@ -529,41 +612,12 @@ class Commander:
         else:
             print(f"命令有误，或者不支持单任务运行 {cmd}")
 
-    def handle_args(self, args: str) -> list:
-        ''''处理参数列表'''
-        result = []
-        arg = ''
-        i = 0
-        flag_1 = False  # 标记 "
-        flag_2 = False  # 标记 '
-        while i < len(args):
-            if flag_1 and args[i] != '"':
-                arg += args[i]
-            elif flag_2 and args[i] != '\'':
-                arg += args[i]
-            elif args[i] not in (' ', '\\', '"', '\''):
-                arg += args[i]
-            elif args[i] == '\\' and i < len(args) and args[i+1] == ' ':
-                arg += ' '
-                i += 1  # 额外前进一步
-            elif args[i] == ' ':
-                if arg:
-                    result.append(arg)
-                    arg = ''  # 新的参数
-            elif args[i] == '"':
-                flag_1 = not flag_1
-            elif args[i] == '\'':
-                flag_2 = not flag_2
-            i += 1
-        if arg:
-            result.append(arg)
-        return result
-
     def run(self):
         """处理交互模式用户命令"""
-        no_arg_cmd = ['bye', 'exit', 'cdrec', 'clear', 'clogin', 'help', 'login', 'logout', 'refresh', 'rmode', 'setpath',
-                      'setsize', 'update', 'setdelay', 'setpasswd']
-        cmd_with_arg = ['ls', 'll', 'cd', 'desc', 'down', 'jobs', 'mkdir', 'mv', 'passwd', 'rename', 'rm', 'share', 'upload']
+        no_arg_cmd = ['bye', 'exit', 'cdrec', 'clear', 'clogin', 'help', 'r', 'c', 'b',
+                      'refresh', 'rmode', 'setpath', 'update', 'who', 'quota']
+        cmd_with_arg = ['ls', 'll', 'cd', 'down', 'jobs', 'shared', 'su', 'login', 'logout',
+                        'mkdir', 'mv', 'rename', 'rm', 'share', 'upload', 'sign', 'j', 'u', 'd']
 
         choice_list = [handle_name(i) for i in self._file_list.all_name]  # 引号包裹空格文件名
         cmd_list = no_arg_cmd + cmd_with_arg
@@ -578,7 +632,8 @@ class Commander:
             info('退出本程序请输入 bye 或 exit')
             return None
 
-        cmd, args = (args[0], []) if len(args) == 1 else (args[0], self.handle_args(args[1]))  # 命令, 参数(可带有空格, 没有参数就设为空)
+        cmd, args = (args[0], []) if len(args) == 1 else (
+            args[0], handle_args(args[1]))  # 命令, 参数(可带有空格, 没有参数就设为空)
 
         if cmd in no_arg_cmd:
             getattr(self, cmd)()
